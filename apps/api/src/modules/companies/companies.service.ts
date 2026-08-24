@@ -3,6 +3,8 @@ import {
   ConflictException,
   NotFoundException,
   BadRequestException,
+  OnModuleInit,
+  Logger,
 } from '@nestjs/common';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -11,58 +13,70 @@ import { AuditService } from '../audit/audit.service';
 import { CreateCompanyDto, UpdateCompanyDto } from './dto/company.dto';
 import { AuditAction, Money, TreasuryDirection, TreasuryTransactionType, PaymentMethod } from '@alkabeer/shared';
 
-export interface CompanyLiability {
-  id: string;
-  invoiceNumber: string;
-  companyId: string;
-  companyName: string;
-  companyCode: string;
-  companyColor?: string;
-  billingMonth: string; // YYYY-MM
-  dueDate: string; // YYYY-MM-DD
-  amount: number;
-  paidAmount: number;
-  remainingAmount: number;
-  status: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
-  alertStatus: 'OVERDUE' | 'DUE_SOON' | 'NORMAL';
-  notes?: string;
-  createdAt: string;
-}
-
 @Injectable()
-export class CompaniesService {
+export class CompaniesService implements OnModuleInit {
+  private readonly logger = new Logger(CompaniesService.name);
   private readonly storageFile = path.resolve(process.cwd(), 'backups', 'company_liabilities.json');
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
-  ) {
-    this.ensureStorageExists();
+  ) {}
+
+  async onModuleInit() {
+    await this.migrateJsonLiabilitiesToDatabase();
   }
 
-  private ensureStorageExists() {
-    const dir = path.dirname(this.storageFile);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    if (!fs.existsSync(this.storageFile)) {
-      fs.writeFileSync(this.storageFile, JSON.stringify([], null, 2), 'utf-8');
-    }
-  }
-
-  private readLiabilitiesFromDisk(): CompanyLiability[] {
+  /**
+   * One-time automated migration of legacy JSON liabilities to PostgreSQL
+   */
+  private async migrateJsonLiabilitiesToDatabase() {
     try {
-      this.ensureStorageExists();
+      if (!fs.existsSync(this.storageFile)) return;
       const content = fs.readFileSync(this.storageFile, 'utf-8');
-      return JSON.parse(content || '[]');
-    } catch {
-      return [];
-    }
-  }
+      const items = JSON.parse(content || '[]');
+      if (!Array.isArray(items) || items.length === 0) return;
 
-  private writeLiabilitiesToDisk(data: CompanyLiability[]) {
-    this.ensureStorageExists();
-    fs.writeFileSync(this.storageFile, JSON.stringify(data, null, 2), 'utf-8');
+      this.logger.log(`Migrating ${items.length} legacy JSON company liabilities to PostgreSQL database...`);
+
+      for (const item of items) {
+        if (!item.companyId || !item.billingMonth) continue;
+        const companyExists = await this.prisma.company.findUnique({ where: { id: item.companyId } });
+        if (!companyExists) continue;
+
+        const existing = await this.prisma.companyLiability.findFirst({
+          where: {
+            companyId: item.companyId,
+            billingMonth: item.billingMonth,
+          },
+        });
+
+        if (!existing) {
+          await this.prisma.companyLiability.create({
+            data: {
+              invoiceNumber: item.invoiceNumber || `INV-${item.companyCode}-${item.billingMonth.replace('-', '')}`,
+              companyId: item.companyId,
+              billingMonth: item.billingMonth,
+              dueDate: new Date(item.dueDate || new Date()),
+              amount: item.amount || 0,
+              paidAmount: item.paidAmount || 0,
+              remainingAmount: item.remainingAmount !== undefined ? item.remainingAmount : (item.amount - (item.paidAmount || 0)),
+              status: item.status || 'UNPAID',
+              alertStatus: item.alertStatus || 'NORMAL',
+              notes: item.notes || null,
+              createdAt: item.createdAt ? new Date(item.createdAt) : new Date(),
+            },
+          });
+        }
+      }
+
+      // Rename JSON file so it won't be re-migrated
+      const migratedFile = `${this.storageFile}.migrated`;
+      fs.renameSync(this.storageFile, migratedFile);
+      this.logger.log(`Successfully migrated legacy JSON liabilities to database. Archived to ${migratedFile}`);
+    } catch (err: any) {
+      this.logger.error(`Error during company liabilities JSON migration: ${err?.message || err}`);
+    }
   }
 
   async create(dto: CreateCompanyDto) {
@@ -143,7 +157,7 @@ export class CompaniesService {
       where: { id },
       include: {
         _count: {
-          select: { lines: true },
+          select: { lines: true, liabilities: true },
         },
       },
     });
@@ -165,7 +179,7 @@ export class CompaniesService {
     return this.prisma.company.findMany({
       include: {
         _count: {
-          select: { lines: true },
+          select: { lines: true, liabilities: true },
         },
       },
       orderBy: { name: 'asc' },
@@ -177,7 +191,7 @@ export class CompaniesService {
       where: { id },
       include: {
         _count: {
-          select: { lines: true },
+          select: { lines: true, liabilities: true },
         },
       },
     });
@@ -190,15 +204,37 @@ export class CompaniesService {
   }
 
   // ----------------------------------------------------
-  // B2B COMPANY LIABILITIES & INVOICES PIPELINE
+  // B2B COMPANY LIABILITIES & INVOICES PIPELINE (POSTGRESQL)
   // ----------------------------------------------------
 
   async getLiabilities(statusFilter?: string, search?: string) {
-    const list = this.readLiabilitiesFromDisk();
-    const now = new Date();
+    const where: any = {};
+    if (statusFilter) {
+      where.status = statusFilter;
+    }
+    if (search) {
+      where.OR = [
+        { invoiceNumber: { contains: search, mode: 'insensitive' } },
+        { company: { name: { contains: search, mode: 'insensitive' } } },
+        { company: { code: { contains: search, mode: 'insensitive' } } },
+        { billingMonth: { contains: search, mode: 'insensitive' } },
+      ];
+    }
 
-    // Recalculate alert statuses live
-    const updatedList = list.map((item) => {
+    const rawLiabilities = await this.prisma.companyLiability.findMany({
+      where,
+      orderBy: { dueDate: 'asc' },
+      include: {
+        company: true,
+        installments: {
+          include: { treasuryAccount: true, creator: true },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+    });
+
+    const now = new Date();
+    const formattedLiabilities = rawLiabilities.map((item) => {
       const due = new Date(item.dueDate);
       const diffDays = Math.ceil((due.getTime() - now.getTime()) / (1000 * 3600 * 24));
 
@@ -212,48 +248,42 @@ export class CompaniesService {
       }
 
       return {
-        ...item,
+        id: item.id,
+        invoiceNumber: item.invoiceNumber,
+        companyId: item.companyId,
+        companyName: item.company?.name || '',
+        companyCode: item.company?.code || '',
+        companyColor: item.company?.color || '#0A192F',
+        billingMonth: item.billingMonth,
+        dueDate: item.dueDate.toISOString().split('T')[0],
+        amount: item.amount,
+        paidAmount: item.paidAmount,
+        remainingAmount: item.remainingAmount,
+        status: item.status as any,
         alertStatus,
+        notes: item.notes,
+        createdAt: item.createdAt.toISOString(),
+        installments: item.installments,
       };
     });
 
-    let filtered = updatedList;
-
-    if (statusFilter) {
-      filtered = filtered.filter((i) => i.status === statusFilter);
-    }
-
-    if (search) {
-      const q = search.toLowerCase().trim();
-      filtered = filtered.filter(
-        (i) =>
-          i.companyName.toLowerCase().includes(q) ||
-          i.invoiceNumber.toLowerCase().includes(q) ||
-          i.billingMonth.includes(q) ||
-          (i.notes && i.notes.toLowerCase().includes(q)),
-      );
-    }
-
-    // KPI Metrics calculation
-    const totalOutstanding = updatedList.reduce((acc, i) => acc + i.remainingAmount, 0);
-
+    const totalOutstanding = formattedLiabilities.reduce((acc, i) => acc + i.remainingAmount, 0);
     const currentMonthPrefix = now.toISOString().slice(0, 7);
-    const paidThisMonth = updatedList.reduce((acc, i) => {
+    const paidThisMonth = formattedLiabilities.reduce((acc, i) => {
       if (i.createdAt.startsWith(currentMonthPrefix) || i.status === 'PAID') {
         return acc + i.paidAmount;
       }
       return acc;
     }, 0);
-
-    const pendingCount = updatedList.filter((i) => i.status !== 'PAID').length;
+    const pendingCount = formattedLiabilities.filter((i) => i.status !== 'PAID').length;
 
     return {
-      items: filtered,
+      items: formattedLiabilities,
       summary: {
         totalOutstanding,
         paidThisMonth,
         pendingCount,
-        totalCount: updatedList.length,
+        totalCount: formattedLiabilities.length,
       },
     };
   }
@@ -280,39 +310,41 @@ export class CompaniesService {
       throw new NotFoundException('شركة الاتصالات غير موجودة');
     }
 
-    const list = this.readLiabilitiesFromDisk();
-    const invoiceNumber = `INV-${company.code}-${dto.billingMonth.replace('-', '')}-${(list.length + 101).toString()}`;
+    const count = await this.prisma.companyLiability.count();
+    const invoiceNumber = `INV-${company.code}-${dto.billingMonth.replace('-', '')}-${(count + 101).toString()}`;
 
-    const newLiability: CompanyLiability = {
-      id: `liab-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      invoiceNumber,
-      companyId: company.id,
-      companyName: company.name,
-      companyCode: company.code,
-      companyColor: company.color || '#0A192F',
-      billingMonth: dto.billingMonth,
-      dueDate: dto.dueDate,
-      amount: dto.amount,
-      paidAmount: 0,
-      remainingAmount: dto.amount,
-      status: 'UNPAID',
-      alertStatus: 'NORMAL',
-      notes: dto.notes,
-      createdAt: new Date().toISOString(),
-    };
-
-    list.unshift(newLiability);
-    this.writeLiabilitiesToDisk(list);
+    const liability = await this.prisma.companyLiability.create({
+      data: {
+        invoiceNumber,
+        companyId: company.id,
+        billingMonth: dto.billingMonth,
+        dueDate: new Date(dto.dueDate),
+        amount: dto.amount,
+        paidAmount: 0,
+        remainingAmount: dto.amount,
+        status: 'UNPAID',
+        alertStatus: 'NORMAL',
+        notes: dto.notes,
+      },
+      include: { company: true },
+    });
 
     await this.auditService.record({
       action: AuditAction.CREATE,
       entityType: 'CompanyLiability',
-      entityId: newLiability.id,
-      newData: newLiability,
+      entityId: liability.id,
+      newData: liability,
       userId,
     });
 
-    return newLiability;
+    return {
+      ...liability,
+      companyName: company.name,
+      companyCode: company.code,
+      companyColor: company.color || '#0A192F',
+      dueDate: liability.dueDate.toISOString().split('T')[0],
+      createdAt: liability.createdAt.toISOString(),
+    };
   }
 
   async payLiabilityInstallment(
@@ -329,22 +361,6 @@ export class CompaniesService {
       throw new BadRequestException('مبلغ السداد يجب أن يكون أكبر من صفر');
     }
 
-    const list = this.readLiabilitiesFromDisk();
-    const index = list.findIndex((i) => i.id === id);
-
-    if (index === -1) {
-      throw new NotFoundException('فاتورة / التزام الشركة غير موجود');
-    }
-
-    const item = list[index];
-    if (item.status === 'PAID' || item.remainingAmount <= 0) {
-      throw new BadRequestException('هذه الفاتورة مسددة بالكامل بالفعل');
-    }
-
-    if (dto.amount > item.remainingAmount) {
-      throw new BadRequestException(`مبلغ السداد أكبر من المتبقي على الفاتورة (${Money.format(item.remainingAmount)} ج.م)`);
-    }
-
     const treasuryAccount = await this.prisma.treasuryAccount.findUnique({
       where: { id: dto.treasuryAccountId },
     });
@@ -357,9 +373,25 @@ export class CompaniesService {
       throw new BadRequestException(`رصيد الخزينة الحقيقي (${Money.format(treasuryAccount.currentBalance)} ج.م) لا يكفي لخصم المبلغ`);
     }
 
-    // Execute atomic Treasury OUT deduction
-    await this.prisma.$transaction(async (tx) => {
-      // 1. Deduct from treasury account
+    return this.prisma.$transaction(async (tx) => {
+      const liability = await tx.companyLiability.findUnique({
+        where: { id },
+        include: { company: true },
+      });
+
+      if (!liability) {
+        throw new NotFoundException('فاتورة / التزام الشركة غير موجود');
+      }
+
+      if (liability.status === 'PAID' || liability.remainingAmount <= 0) {
+        throw new BadRequestException('هذه الفاتورة مسددة بالكامل بالفعل');
+      }
+
+      if (dto.amount > liability.remainingAmount) {
+        throw new BadRequestException(`مبلغ السداد أكبر من المتبقي على الفاتورة (${Money.format(liability.remainingAmount)} ج.م)`);
+      }
+
+      // Deduct from treasury account
       await tx.treasuryAccount.update({
         where: { id: treasuryAccount.id },
         data: {
@@ -370,7 +402,6 @@ export class CompaniesService {
       const txCount = await tx.treasuryTransaction.count();
       const transactionNumber = `TX-OUT-${(txCount + 10001).toString()}`;
 
-      // 2. Record Treasury OUT transaction
       await tx.treasuryTransaction.create({
         data: {
           transactionNumber,
@@ -378,51 +409,77 @@ export class CompaniesService {
           amount: dto.amount,
           direction: TreasuryDirection.OUT,
           transactionType: TreasuryTransactionType.EXPENSE,
-          description: `سداد فاتورة شركة ${item.companyName} (${item.invoiceNumber}) — شهر ${item.billingMonth}`,
+          description: `سداد فاتورة شركة ${liability.company.name} (${liability.invoiceNumber}) — شهر ${liability.billingMonth}`,
           createdBy: userId,
         },
       });
+
+      // Record installment
+      await tx.companyLiabilityInstallment.create({
+        data: {
+          liabilityId: liability.id,
+          amount: dto.amount,
+          paymentMethod: dto.paymentMethod || PaymentMethod.CASH,
+          treasuryAccountId: treasuryAccount.id,
+          notes: dto.notes,
+          createdBy: userId,
+        },
+      });
+
+      // Update Liability record
+      const newPaidAmount = Money.add(liability.paidAmount, dto.amount);
+      const newRemainingAmount = Money.subtract(liability.amount, newPaidAmount);
+      const newStatus = newRemainingAmount <= 0 ? 'PAID' : 'PARTIALLY_PAID';
+
+      const updatedLiability = await tx.companyLiability.update({
+        where: { id: liability.id },
+        data: {
+          paidAmount: newPaidAmount,
+          remainingAmount: newRemainingAmount,
+          status: newStatus,
+        },
+        include: { company: true, installments: true },
+      });
+
+      await this.auditService.record(
+        {
+          action: AuditAction.UPDATE,
+          entityType: 'CompanyLiabilityPayment',
+          entityId: liability.id,
+          newData: {
+            paidInstallment: dto.amount,
+            remainingAmount: newRemainingAmount,
+            status: newStatus,
+            treasuryAccountId: dto.treasuryAccountId,
+          },
+          userId,
+        },
+        tx,
+      );
+
+      return {
+        ...updatedLiability,
+        companyName: updatedLiability.company.name,
+        companyCode: updatedLiability.company.code,
+        companyColor: updatedLiability.company.color || '#0A192F',
+        dueDate: updatedLiability.dueDate.toISOString().split('T')[0],
+        createdAt: updatedLiability.createdAt.toISOString(),
+      };
     });
-
-    // Update Liability record
-    const newPaidAmount = item.paidAmount + dto.amount;
-    const newRemainingAmount = item.amount - newPaidAmount;
-    const newStatus = newRemainingAmount <= 0 ? 'PAID' : 'PARTIALLY_PAID';
-
-    list[index] = {
-      ...item,
-      paidAmount: newPaidAmount,
-      remainingAmount: newRemainingAmount,
-      status: newStatus,
-    };
-
-    this.writeLiabilitiesToDisk(list);
-
-    await this.auditService.record({
-      action: AuditAction.UPDATE,
-      entityType: 'CompanyLiabilityPayment',
-      entityId: item.id,
-      newData: {
-        paidInstallment: dto.amount,
-        remainingAmount: newRemainingAmount,
-        status: newStatus,
-        treasuryAccountId: dto.treasuryAccountId,
-      },
-      userId,
-    });
-
-    return list[index];
   }
 
   async deleteLiability(id: string, userId?: string) {
-    const list = this.readLiabilitiesFromDisk();
-    const filtered = list.filter((i) => i.id !== id);
+    const liability = await this.prisma.companyLiability.findUnique({
+      where: { id },
+    });
 
-    if (list.length === filtered.length) {
+    if (!liability) {
       throw new NotFoundException('التزام الشركة غير موجود');
     }
 
-    this.writeLiabilitiesToDisk(filtered);
+    await this.prisma.companyLiability.delete({
+      where: { id },
+    });
 
     await this.auditService.record({
       action: AuditAction.DELETE,

@@ -89,9 +89,10 @@ export class BackupController {
     }
 
     return {
-      success: true,
-      message: 'تم التحقق من صلاحيات المشرف وتنفيذ عملية استعادة قاعدة البيانات بنجاح',
-      restoredAt: new Date().toISOString(),
+      success: false,
+      isImplemented: false,
+      message: 'تأكيد الصلاحيات ناجح. ملاحظة هامة: استعادة قاعدة البيانات من ملفات الـ Dump يجب تنفيذها عبر مدير النظام مباشرة عبر psql أو pg_restore لضمان سلامة الاتساق والقيود المرجعية.',
+      verifiedAt: new Date().toISOString(),
     };
   }
 

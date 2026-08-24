@@ -122,7 +122,7 @@ export class LedgerService {
     });
 
     // Re-verify running balance consistency
-    let runningBalance = customer.openingBalance;
+    let runningBalance = 0;
     const verifiedEntries = ledgerEntries.map((entry: any) => {
       runningBalance = runningBalance + entry.debit - entry.credit;
       return {

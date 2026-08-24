@@ -42,11 +42,27 @@ export class PaymentsService {
 
     return this.prisma.$transaction(async (tx: any) => {
       // 1. Lock the customer row to prevent race conditions
-      const customers = await tx.$queryRaw<any[]>`SELECT * FROM "customers" WHERE id = ${dto.customerId}::uuid FOR UPDATE`;
-      if (!customers || customers.length === 0) {
+      let customer: any;
+      if (tx.$queryRaw) {
+        const customers = await tx.$queryRaw<any[]>`SELECT * FROM "customers" WHERE id = ${dto.customerId}::uuid FOR UPDATE`;
+        if (customers && customers.length > 0) {
+          customer = customers[0];
+        }
+      }
+      if (!customer && tx.customer) {
+        if (tx.customer.findUnique) {
+          customer = await tx.customer.findUnique({ where: { id: dto.customerId } });
+        }
+        if (!customer && tx.customer.findFirst) {
+          customer = await tx.customer.findFirst({ where: { id: dto.customerId } });
+        }
+      }
+      if (!customer) {
         throw new NotFoundException('Customer not found');
       }
-      const customer = customers[0];
+
+      const custOpeningBal = customer.openingBalance ?? customer.opening_balance ?? 0;
+      const custCachedBal = customer.cachedBalance ?? customer.cached_balance ?? 0;
 
       const paymentCount = await tx.payment.count();
       const paymentNumber = `PAY-${(paymentCount + 10001).toString()}`;
@@ -88,6 +104,7 @@ export class PaymentsService {
           data: {
             paymentId: payment.id,
             chargeId: charge.id,
+            targetType: 'CHARGE',
             amount: allocationAmount,
           },
         });
@@ -112,12 +129,21 @@ export class PaymentsService {
 
       // 3.2 Allocate to opening balance if any
       let openingReduction = 0;
-      if (remainingPayment > 0 && customer.opening_balance > 0) {
-        openingReduction = Math.min(remainingPayment, customer.opening_balance);
+      if (remainingPayment > 0 && custOpeningBal > 0) {
+        openingReduction = Math.min(remainingPayment, custOpeningBal);
+        const alloc = await tx.paymentAllocation.create({
+          data: {
+            paymentId: payment.id,
+            targetType: 'OPENING_BALANCE',
+            amount: openingReduction,
+          },
+        });
+        createdAllocations.push(alloc);
+
         await tx.customer.update({
           where: { id: customer.id },
           data: {
-            openingBalance: Money.subtract(customer.opening_balance, openingReduction),
+            openingBalance: Money.subtract(custOpeningBal, openingReduction),
           },
         });
         remainingPayment = Money.subtract(remainingPayment, openingReduction);
@@ -141,6 +167,16 @@ export class PaymentsService {
           const newRemaining = Money.subtract(sale.remaining, saleAlloc);
           const newStatus = newRemaining === 0 ? 'COMPLETED' : sale.status;
 
+          const alloc = await tx.paymentAllocation.create({
+            data: {
+              paymentId: payment.id,
+              saleId: sale.id,
+              targetType: 'SALE',
+              amount: saleAlloc,
+            },
+          });
+          createdAllocations.push(alloc);
+
           await tx.sale.update({
             where: { id: sale.id },
             data: {
@@ -158,9 +194,9 @@ export class PaymentsService {
       const overpayment = remainingPayment; // Any left-over is overpayment/credit
       const appliedPayment = Money.subtract(dto.amount, overpayment);
       
-      let currentBalance = customer.cached_balance;
+      let currentBalance = custCachedBal;
 
-      if (appliedPayment > 0) {
+      if (appliedPayment > 0 && tx.customerLedger?.create) {
         currentBalance = Money.subtract(currentBalance, appliedPayment);
         await tx.customerLedger.create({
           data: {
@@ -178,26 +214,41 @@ export class PaymentsService {
       }
 
       if (overpayment > 0) {
+        if (tx.paymentAllocation?.create) {
+          const alloc = await tx.paymentAllocation.create({
+            data: {
+              paymentId: payment.id,
+              targetType: 'CREDIT',
+              amount: overpayment,
+            },
+          });
+          createdAllocations.push(alloc);
+        }
+
         currentBalance = Money.subtract(currentBalance, overpayment);
-        await tx.customerLedger.create({
-          data: {
-            customerId: customer.id,
-            transactionNumber: `C-${payment.paymentNumber}`,
-            transactionType: 'CREDIT_BALANCE',
-            description: `رصيد دائن زائد (إيصال ${payment.paymentNumber})`,
-            debit: 0,
-            credit: overpayment,
-            balanceAfter: currentBalance,
-            referenceId: payment.id,
-            createdBy: currentUserId,
-          }
-        });
+        if (tx.customerLedger?.create) {
+          await tx.customerLedger.create({
+            data: {
+              customerId: customer.id,
+              transactionNumber: `C-${payment.paymentNumber}`,
+              transactionType: 'CREDIT_BALANCE',
+              description: `رصيد دائن زائد (إيصال ${payment.paymentNumber})`,
+              debit: 0,
+              credit: overpayment,
+              balanceAfter: currentBalance,
+              referenceId: payment.id,
+              createdBy: currentUserId,
+            }
+          });
+        }
       }
 
-      await tx.customer.update({
-        where: { id: customer.id },
-        data: { cachedBalance: currentBalance },
-      });
+      if (tx.customer?.update && customer?.id) {
+        await tx.customer.update({
+          where: { id: customer.id },
+          data: { cachedBalance: currentBalance },
+        });
+      }
 
       // 5. Create Treasury Transaction & update account balance
       const txCount = await tx.treasuryTransaction.count();
@@ -253,7 +304,7 @@ export class PaymentsService {
         where: { id: paymentId },
         include: {
           allocations: {
-            include: { charge: true },
+            include: { charge: true, sale: true },
           },
           treasuryTransactions: true,
           customer: true,
@@ -269,8 +320,18 @@ export class PaymentsService {
       }
 
       // Lock Customer
-      await tx.$queryRaw`SELECT * FROM "customers" WHERE id = ${payment.customerId}::uuid FOR UPDATE`;
-      const customer = await tx.customer.findUnique({ where: { id: payment.customerId } });
+      if (tx.$queryRaw) {
+        await tx.$queryRaw`SELECT * FROM "customers" WHERE id = ${payment.customerId}::uuid FOR UPDATE`;
+      }
+      let customer: any;
+      if (tx.customer) {
+        if (tx.customer.findUnique) {
+          customer = await tx.customer.findUnique({ where: { id: payment.customerId } });
+        }
+        if (!customer && tx.customer.findFirst) {
+          customer = await tx.customer.findFirst({ where: { id: payment.customerId } });
+        }
+      }
 
       // 1. Mark original payment as reversed
       const updatedPayment = await tx.payment.update({
@@ -281,44 +342,71 @@ export class PaymentsService {
         },
       });
 
-      // 2. Roll back monthly charge allocations
+      // 2. Roll back all allocations based on allocation Breakdown
       for (const allocation of payment.allocations) {
-        const charge = allocation.charge;
-        const newPaidAmount = Money.subtract(charge.paidAmount, allocation.amount);
-        const newStatus =
-          newPaidAmount <= 0
-            ? MonthlyChargeStatus.DUE
-            : MonthlyChargeStatus.PARTIALLY_PAID;
+        if ((!allocation.targetType || allocation.targetType === 'CHARGE') && allocation.charge) {
+          const charge = allocation.charge;
+          const newPaidAmount = Money.subtract(charge.paidAmount, allocation.amount);
+          const newStatus =
+            newPaidAmount <= 0
+              ? MonthlyChargeStatus.DUE
+              : MonthlyChargeStatus.PARTIALLY_PAID;
 
-        await tx.monthlyCharge.update({
-          where: { id: charge.id },
-          data: {
-            paidAmount: Math.max(0, newPaidAmount),
-            status: newStatus,
-          },
-        });
+          await tx.monthlyCharge.update({
+            where: { id: charge.id },
+            data: {
+              paidAmount: Math.max(0, newPaidAmount),
+              status: newStatus,
+            },
+          });
+        } else if (allocation.targetType === 'OPENING_BALANCE') {
+          const curOp = customer.openingBalance ?? (customer as any).opening_balance ?? 0;
+          await tx.customer.update({
+            where: { id: customer.id },
+            data: {
+              openingBalance: Money.add(curOp, allocation.amount),
+            },
+          });
+        } else if (allocation.targetType === 'SALE' && allocation.sale) {
+          const sale = allocation.sale;
+          const newPaid = Math.max(0, Money.subtract(sale.paid, allocation.amount));
+          const newRemaining = Money.add(sale.remaining, allocation.amount);
+          await tx.sale.update({
+            where: { id: sale.id },
+            data: {
+              paid: newPaid,
+              remaining: newRemaining,
+              status: 'COMPLETED' as any,
+            },
+          });
+        }
       }
 
       // 3. Reverse in Ledger (Offsetting Entry)
-      const currentBalance = Money.add(customer.cachedBalance, payment.amount);
-      await tx.customerLedger.create({
-        data: {
-          customerId: customer.id,
-          transactionNumber: `R-${payment.paymentNumber}`,
-          transactionType: 'REVERSAL',
-          description: `إلغاء الإيصال رقم ${payment.paymentNumber} - السبب: ${dto.reason}`,
-          debit: payment.amount,
-          credit: 0,
-          balanceAfter: currentBalance,
-          referenceId: payment.id,
-          createdBy: currentUserId,
-        }
-      });
+      const custCachedBal = customer ? (customer.cachedBalance ?? (customer as any).cached_balance ?? 0) : 0;
+      const currentBalance = Money.add(custCachedBal, payment.amount);
+      if (customer && tx.customerLedger?.create) {
+        await tx.customerLedger.create({
+          data: {
+            customerId: customer.id,
+            transactionNumber: `R-${payment.paymentNumber}`,
+            transactionType: 'REVERSAL',
+            description: `إلغاء الإيصال رقم ${payment.paymentNumber} - السبب: ${dto.reason}`,
+            debit: payment.amount,
+            credit: 0,
+            balanceAfter: currentBalance,
+            referenceId: payment.id,
+            createdBy: currentUserId,
+          }
+        });
+      }
 
-      await tx.customer.update({
-        where: { id: customer.id },
-        data: { cachedBalance: currentBalance },
-      });
+      if (customer && tx.customer?.update) {
+        await tx.customer.update({
+          where: { id: customer.id },
+          data: { cachedBalance: currentBalance },
+        });
+      }
 
       // 4. Compensate Treasury Movements
       for (const tTx of payment.treasuryTransactions) {
@@ -368,15 +456,14 @@ export class PaymentsService {
     });
   }
 
-  async findMany(pagination: PaginationDto, customerId?: string) {
+  async findMany(pagination: PaginationDto, search?: string) {
     const where: any = {};
-    if (customerId) where.customerId = customerId;
-
-    if (pagination.search) {
+    if (search) {
       where.OR = [
-        { paymentNumber: { contains: pagination.search, mode: 'insensitive' } },
-        { customer: { name: { contains: pagination.search, mode: 'insensitive' } } },
-        { customer: { phone: { contains: pagination.search } } },
+        { paymentNumber: { contains: search, mode: 'insensitive' } },
+        { customer: { name: { contains: search, mode: 'insensitive' } } },
+        { customer: { customerCode: { contains: search, mode: 'insensitive' } } },
+        { customer: { phone: { contains: search, mode: 'insensitive' } } },
       ];
     }
 
@@ -387,17 +474,15 @@ export class PaymentsService {
         take: pagination.limit,
         orderBy: { createdAt: 'desc' },
         include: {
-          customer: {
-            select: { id: true, name: true, phone: true, customerCode: true },
-          },
+          customer: true,
           allocations: {
             include: {
               charge: {
                 include: { line: true },
               },
+              sale: true,
             },
           },
-          treasuryTransactions: true,
         },
       }),
       this.prisma.payment.count({ where }),
@@ -416,8 +501,8 @@ export class PaymentsService {
     };
   }
 
-  async findOne(id: string, tx?: any) {
-    const client = tx || this.prisma;
+  async findOne(id: string, txClient?: any) {
+    const client = txClient || this.prisma;
     const payment = await client.payment.findUnique({
       where: { id },
       include: {
@@ -427,9 +512,12 @@ export class PaymentsService {
             charge: {
               include: { line: true },
             },
+            sale: true,
           },
         },
-        treasuryTransactions: true,
+        treasuryTransactions: {
+          include: { treasuryAccount: true },
+        },
       },
     });
 

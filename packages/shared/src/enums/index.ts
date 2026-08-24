@@ -84,3 +84,13 @@ export enum AuditAction {
   DAILY_REOPEN = 'DAILY_REOPEN',
   EXPORT = 'EXPORT',
 }
+
+export enum LedgerTransactionType {
+  OPENING_BALANCE = 'OPENING_BALANCE',
+  INVOICE = 'INVOICE',
+  PAYMENT = 'PAYMENT',
+  CREDIT_BALANCE = 'CREDIT_BALANCE',
+  CREDIT_USAGE = 'CREDIT_USAGE',
+  REVERSAL = 'REVERSAL',
+}
+

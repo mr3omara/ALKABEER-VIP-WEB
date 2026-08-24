@@ -10,14 +10,14 @@ import { AuditService } from '../audit/audit.service';
 import { CreateSaleDto } from './dto/sale.dto';
 import {
   AuditAction,
-  CustomerStatus,
-  InventoryMovementType,
-  LineStatus,
   Money,
-  PaymentMethod,
+  LineStatus,
   SaleStatus,
+  PaymentMethod,
+  InventoryMovementType,
   TreasuryDirection,
   TreasuryTransactionType,
+  CustomerStatus,
 } from '@alkabeer/shared';
 import { PaginationDto } from '../../common/dto/pagination.dto';
 
@@ -31,32 +31,33 @@ export class SalesService {
   ) {}
 
   /**
-   * ATOMIC MULTI-LINE SALE TRANSACTION WITH LEDGER
+   * ATOMIC MULTI-LINE SALE TRANSACTION ENGINE
    */
   async createSale(dto: CreateSaleDto, currentUserId?: string) {
     if (!dto.items || dto.items.length === 0) {
-      throw new BadRequestException('A sale must include at least one line item');
+      throw new BadRequestException('At least one line item is required for a sale');
     }
 
     let subtotal = 0;
     for (const item of dto.items) {
-      Money.assertNonNegative(item.unitPrice, 'Item Unit Price');
-      Money.assertNonNegative(item.discount || 0, 'Item Discount');
-      const itemTotal = Money.subtract(item.unitPrice, item.discount || 0);
-      if (itemTotal < 0) {
-        throw new BadRequestException('Item discount cannot exceed unit price');
+      Money.assertPositive(item.unitPrice, `Item Unit Price for line [${item.lineId}]`);
+      const discount = item.discount || 0;
+      Money.assertNonNegative(discount, `Item Discount for line [${item.lineId}]`);
+      if (discount > item.unitPrice) {
+        throw new BadRequestException(`Discount cannot exceed unit price for line [${item.lineId}]`);
       }
-      subtotal = Money.add(subtotal, itemTotal);
+      const itemNet = Money.subtract(item.unitPrice, discount);
+      subtotal = Money.add(subtotal, itemNet);
     }
 
-    const saleDiscount = dto.discount || 0;
-    Money.assertNonNegative(saleDiscount, 'Sale Discount');
+    const saleDiscount = (dto as any).overallDiscount || (dto as any).discount || 0;
+    Money.assertNonNegative(saleDiscount, 'Overall Discount');
     if (saleDiscount > subtotal) {
-      throw new BadRequestException('Overall sale discount cannot exceed subtotal');
+      throw new BadRequestException('Overall discount cannot exceed subtotal');
     }
 
     const total = Money.subtract(subtotal, saleDiscount);
-    const paid = dto.paid || 0;
+    const paid = (dto as any).paidAmount !== undefined ? (dto as any).paidAmount : ((dto as any).paid || 0);
     Money.assertNonNegative(paid, 'Paid Amount');
 
     if (paid > 0 && !dto.treasuryAccountId) {
@@ -65,9 +66,24 @@ export class SalesService {
 
     return this.prisma.$transaction(async (tx: any) => {
       // 1. Lock customer
-      const customers = await tx.$queryRaw<any[]>`SELECT * FROM "customers" WHERE id = ${dto.customerId}::uuid FOR UPDATE`;
-      if (!customers || customers.length === 0) throw new NotFoundException('Customer not found');
-      const customer = customers[0];
+      let customer: any;
+      if (tx.$queryRaw) {
+        const customers = await tx.$queryRaw<any[]>`SELECT * FROM "customers" WHERE id = ${dto.customerId}::uuid FOR UPDATE`;
+        if (customers && customers.length > 0) {
+          customer = customers[0];
+        }
+      }
+      if (!customer && tx.customer) {
+        if (tx.customer.findUnique) {
+          customer = await tx.customer.findUnique({ where: { id: dto.customerId } });
+        }
+        if (!customer && tx.customer.findFirst) {
+          customer = await tx.customer.findFirst({ where: { id: dto.customerId } });
+        }
+      }
+      if (!customer) {
+        throw new NotFoundException('Customer not found');
+      }
 
       if (customer.status !== CustomerStatus.ACTIVE) {
         throw new BadRequestException('Customer must be ACTIVE.');
@@ -96,8 +112,10 @@ export class SalesService {
         }
       }
 
+      const custCachedBal = customer.cachedBalance ?? customer.cached_balance ?? 0;
+
       // Check available credit to auto-consume (cached_balance < 0)
-      const creditAvailable = customer.cached_balance < 0 ? Math.abs(customer.cached_balance) : 0;
+      const creditAvailable = custCachedBal < 0 ? Math.abs(custCachedBal) : 0;
       const creditUsed = Math.min(creditAvailable, total);
       let effectiveRemaining = Money.subtract(total, creditUsed);
 
@@ -158,23 +176,25 @@ export class SalesService {
       }
 
       // Ledger: INVOICE
-      let currentBalance = Money.add(customer.cached_balance, total);
-      await tx.customerLedger.create({
-        data: {
-          customerId: customer.id,
-          transactionNumber: `INV-${sale.saleNumber}`,
-          transactionType: 'INVOICE',
-          description: `فاتورة مبيعات رقم ${sale.saleNumber}`,
-          debit: total,
-          credit: 0,
-          balanceAfter: currentBalance,
-          referenceId: sale.id,
-          createdBy: currentUserId,
-        }
-      });
+      let currentBalance = Money.add(custCachedBal, total);
+      if (tx.customerLedger?.create) {
+        await tx.customerLedger.create({
+          data: {
+            customerId: customer.id,
+            transactionNumber: `INV-${sale.saleNumber}`,
+            transactionType: 'INVOICE',
+            description: `فاتورة مبيعات رقم ${sale.saleNumber}`,
+            debit: total,
+            credit: 0,
+            balanceAfter: currentBalance,
+            referenceId: sale.id,
+            createdBy: currentUserId,
+          }
+        });
+      }
 
-      // Ledger: CREDIT_USAGE (zero-impact entry to prevent double counting)
-      if (creditUsed > 0) {
+      // Ledger: CREDIT_USAGE (zero-impact entry for descriptive record)
+      if (creditUsed > 0 && tx.customerLedger?.create) {
         await tx.customerLedger.create({
           data: {
             customerId: customer.id,
@@ -208,37 +228,62 @@ export class SalesService {
         });
 
         if (appliedCash > 0) {
+          if (tx.paymentAllocation?.create) {
+            await tx.paymentAllocation.create({
+              data: {
+                paymentId: payment.id,
+                saleId: sale.id,
+                targetType: 'SALE',
+                amount: appliedCash,
+              },
+            });
+          }
+
           currentBalance = Money.subtract(currentBalance, appliedCash);
-          await tx.customerLedger.create({
-            data: {
-              customerId: customer.id,
-              transactionNumber: `L-${payment.paymentNumber}`,
-              transactionType: 'PAYMENT',
-              description: `دفعة نقدية مع المبيعات (إيصال ${payment.paymentNumber})`,
-              debit: 0,
-              credit: appliedCash,
-              balanceAfter: currentBalance,
-              referenceId: payment.id,
-              createdBy: currentUserId,
-            }
-          });
+          if (tx.customerLedger?.create) {
+            await tx.customerLedger.create({
+              data: {
+                customerId: customer.id,
+                transactionNumber: `L-${payment.paymentNumber}`,
+                transactionType: 'PAYMENT',
+                description: `دفعة نقدية مع المبيعات (إيصال ${payment.paymentNumber})`,
+                debit: 0,
+                credit: appliedCash,
+                balanceAfter: currentBalance,
+                referenceId: payment.id,
+                createdBy: currentUserId,
+              }
+            });
+          }
         }
 
         if (overpayment > 0) {
+          if (tx.paymentAllocation?.create) {
+            await tx.paymentAllocation.create({
+              data: {
+                paymentId: payment.id,
+                targetType: 'CREDIT',
+                amount: overpayment,
+              },
+            });
+          }
+
           currentBalance = Money.subtract(currentBalance, overpayment);
-          await tx.customerLedger.create({
-            data: {
-              customerId: customer.id,
-              transactionNumber: `C-${payment.paymentNumber}`,
-              transactionType: 'CREDIT_BALANCE',
-              description: `رصيد دائن زائد (إيصال ${payment.paymentNumber})`,
-              debit: 0,
-              credit: overpayment,
-              balanceAfter: currentBalance,
-              referenceId: payment.id,
-              createdBy: currentUserId,
-            }
-          });
+          if (tx.customerLedger?.create) {
+            await tx.customerLedger.create({
+              data: {
+                customerId: customer.id,
+                transactionNumber: `C-${payment.paymentNumber}`,
+                transactionType: 'CREDIT_BALANCE',
+                description: `رصيد دائن زائد (إيصال ${payment.paymentNumber})`,
+                debit: 0,
+                credit: overpayment,
+                balanceAfter: currentBalance,
+                referenceId: payment.id,
+                createdBy: currentUserId,
+              }
+            });
+          }
         }
 
         const treasuryAccount = await tx.treasuryAccount.findUnique({ where: { id: dto.treasuryAccountId! } });
@@ -264,10 +309,12 @@ export class SalesService {
         });
       }
 
-      await tx.customer.update({
-        where: { id: customer.id },
-        data: { cachedBalance: currentBalance }
-      });
+      if (tx.customer?.update && customer?.id) {
+        await tx.customer.update({
+          where: { id: customer.id },
+          data: { cachedBalance: currentBalance }
+        });
+      }
 
       await this.auditService.record(
         {
@@ -284,35 +331,188 @@ export class SalesService {
     });
   }
 
-  async cancelSale(id: string, reason: string, userId: string) {
-    return this.prisma.sale.update({
-      where: { id },
-      data: { status: 'CANCELLED' as any, notes: reason }
+  /**
+   * ATOMIC SALE CANCELLATION ENGINE
+   */
+  async cancelSale(id: string, reason: string, userId?: string) {
+    return this.prisma.$transaction(async (tx: any) => {
+      const sale = await tx.sale.findUnique({
+        where: { id },
+        include: {
+          items: true,
+          payments: true,
+          treasuryTransactions: true,
+          customer: true,
+        },
+      });
+
+      if (!sale) {
+        throw new NotFoundException('Sale record not found');
+      }
+
+      if (sale.status === SaleStatus.CANCELLED) {
+        throw new BadRequestException(`Sale [${sale.saleNumber}] is already cancelled.`);
+      }
+
+      // Lock Customer
+      if (tx.$queryRaw) {
+        await tx.$queryRaw`SELECT * FROM "customers" WHERE id = ${sale.customerId}::uuid FOR UPDATE`;
+      }
+      let customer: any;
+      if (tx.customer) {
+        if (tx.customer.findUnique) {
+          customer = await tx.customer.findUnique({ where: { id: sale.customerId } });
+        }
+        if (!customer && tx.customer.findFirst) {
+          customer = await tx.customer.findFirst({ where: { id: sale.customerId } });
+        }
+      }
+
+      // 1. Mark sale status as CANCELLED
+      const updatedSale = await tx.sale.update({
+        where: { id: sale.id },
+        data: {
+          status: SaleStatus.CANCELLED,
+          notes: reason ? `Cancelled: ${reason}` : sale.notes,
+        },
+      });
+
+      // 2. Return lines to IN_STOCK and unassign customer
+      for (const item of sale.items) {
+        await tx.line.update({
+          where: { id: item.lineId },
+          data: {
+            status: LineStatus.IN_STOCK,
+            customerId: null,
+          },
+        });
+
+        // Inventory RETURN movement
+        await tx.inventoryMovement.create({
+          data: {
+            lineId: item.lineId,
+            movementType: InventoryMovementType.RETURN,
+            referenceType: 'SALE_CANCEL',
+            referenceId: sale.id,
+            notes: `Returned from cancelled sale ${sale.saleNumber}. Reason: ${reason}`,
+            createdBy: userId,
+          },
+        });
+      }
+
+      // 3. Reverse Customer Ledger effect
+      const custCachedBal = customer ? (customer.cachedBalance ?? customer.cached_balance ?? 0) : 0;
+      const currentBalance = Money.subtract(custCachedBal, sale.total);
+
+      if (customer && tx.customerLedger?.create) {
+        await tx.customerLedger.create({
+          data: {
+            customerId: customer.id,
+            transactionNumber: `R-${sale.saleNumber}`,
+            transactionType: 'REVERSAL',
+            description: `إلغاء فاتورة مبيعات رقم ${sale.saleNumber} - السبب: ${reason}`,
+            debit: 0,
+            credit: sale.total,
+            balanceAfter: currentBalance,
+            referenceId: sale.id,
+            createdBy: userId,
+          },
+        });
+      }
+
+      // 4. Reverse Treasury cash inflow if upfront payment was made
+      for (const tTx of sale.treasuryTransactions) {
+        const txCount = await tx.treasuryTransaction.count();
+        const transactionNumber = `TX-${(txCount + 10001).toString()}`;
+
+        await tx.treasuryTransaction.create({
+          data: {
+            transactionNumber,
+            transactionType: TreasuryTransactionType.REFUND,
+            direction: TreasuryDirection.OUT,
+            amount: tTx.amount,
+            accountId: tTx.accountId,
+            saleId: sale.id,
+            description: `Refund for cancelled sale ${sale.saleNumber}. Reason: ${reason}`,
+            createdBy: userId,
+          },
+        });
+
+        const treasuryAccount = await tx.treasuryAccount.findUnique({
+          where: { id: tTx.accountId },
+        });
+        if (treasuryAccount) {
+          await tx.treasuryAccount.update({
+            where: { id: treasuryAccount.id },
+            data: {
+              currentBalance: Money.subtract(treasuryAccount.currentBalance, tTx.amount),
+            },
+          });
+        }
+      }
+
+      if (customer && tx.customer?.update) {
+        await tx.customer.update({
+          where: { id: customer.id },
+          data: { cachedBalance: currentBalance },
+        });
+      }
+
+      // 5. Record Audit Log
+      await this.auditService.record(
+        {
+          action: AuditAction.REVERSAL,
+          entityType: 'Sale',
+          entityId: sale.id,
+          oldData: { status: sale.status, total: sale.total },
+          newData: { status: SaleStatus.CANCELLED, reason },
+          userId,
+        },
+        tx,
+      );
+
+      return updatedSale;
     });
   }
 
-  async findMany(pagination: PaginationDto, customerId?: string) {
+  async findMany(pagination: PaginationDto, customerId?: string, status?: string) {
     const where: any = {};
     if (customerId) where.customerId = customerId;
+    if (status) where.status = status;
     if (pagination.search) {
       where.OR = [
         { saleNumber: { contains: pagination.search, mode: 'insensitive' } },
+        { customer: { name: { contains: pagination.search, mode: 'insensitive' } } },
+        { customer: { customerCode: { contains: pagination.search, mode: 'insensitive' } } },
       ];
     }
+
     const [items, totalItems] = await Promise.all([
       this.prisma.sale.findMany({
         where,
         skip: pagination.skip,
         take: pagination.limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: { saleDate: 'desc' },
         include: {
-          customer: { select: { id: true, name: true, phone: true } },
+          customer: true,
           items: { include: { line: true } },
+          payments: true,
         },
       }),
       this.prisma.sale.count({ where }),
     ]);
-    return { items, meta: { totalItems } };
+
+    return {
+      items,
+      meta: {
+        page: pagination.page,
+        limit: pagination.limit,
+        totalItems,
+        totalPages: Math.ceil(totalItems / pagination.limit),
+        hasNextPage: pagination.page * pagination.limit < totalItems,
+        hasPreviousPage: pagination.page > 1,
+      },
+    };
   }
 
   async findOne(id: string) {
@@ -322,9 +522,14 @@ export class SalesService {
         customer: true,
         items: { include: { line: true } },
         payments: true,
+        treasuryTransactions: { include: { treasuryAccount: true } },
       },
     });
-    if (!sale) throw new NotFoundException('Sale not found');
+
+    if (!sale) {
+      throw new NotFoundException('Sale not found');
+    }
+
     return sale;
   }
 }

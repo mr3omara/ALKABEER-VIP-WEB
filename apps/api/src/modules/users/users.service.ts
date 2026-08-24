@@ -145,4 +145,98 @@ export class UsersService {
 
     return user;
   }
+
+  async update(id: string, dto: { fullName?: string; email?: string; roles?: string[] }, currentUserId?: string) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id },
+        data: {
+          fullName: dto.fullName !== undefined ? dto.fullName : user.fullName,
+          email: dto.email !== undefined ? dto.email : user.email,
+        },
+      });
+
+      if (dto.roles) {
+        await tx.userRole.deleteMany({ where: { userId: id } });
+        for (const roleName of dto.roles) {
+          const role = await tx.role.findUnique({ where: { name: roleName } });
+          if (role) {
+            await tx.userRole.create({
+              data: {
+                userId: id,
+                roleId: role.id,
+                assignedBy: currentUserId,
+              },
+            });
+          }
+        }
+      }
+
+      await this.auditService.record(
+        {
+          action: AuditAction.UPDATE,
+          entityType: 'User',
+          entityId: id,
+          newData: { fullName: dto.fullName, email: dto.email, roles: dto.roles },
+          userId: currentUserId,
+        },
+        tx,
+      );
+
+      return this.findOne(id, tx);
+    });
+  }
+
+  async changePassword(id: string, newPassword: string, currentUserId?: string) {
+    if (!newPassword || newPassword.length < 6) {
+      throw new BadRequestException('Password must be at least 6 characters');
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const passwordHash = await argon2.hash(newPassword);
+    await this.prisma.user.update({
+      where: { id },
+      data: { passwordHash },
+    });
+
+    await this.auditService.record({
+      action: AuditAction.UPDATE,
+      entityType: 'UserPassword',
+      entityId: id,
+      userId: currentUserId,
+    });
+
+    return { success: true, message: 'Password updated successfully' };
+  }
+
+  async updateStatus(id: string, status: 'ACTIVE' | 'INACTIVE' | 'BLOCKED', currentUserId?: string) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    await this.prisma.user.update({
+      where: { id },
+      data: { status },
+    });
+
+    await this.auditService.record({
+      action: AuditAction.STATUS_CHANGE,
+      entityType: 'User',
+      entityId: id,
+      newData: { status },
+      userId: currentUserId,
+    });
+
+    return this.findOne(id);
+  }
 }

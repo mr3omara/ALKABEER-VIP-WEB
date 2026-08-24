@@ -270,6 +270,7 @@ export class ImportEngineService {
         });
 
         let customerId = '';
+        const opBal = custData.openingBalance || 0;
         if (existingCustomer) {
           await tx.customer.update({
             where: { id: existingCustomer.id },
@@ -277,7 +278,8 @@ export class ImportEngineService {
               name: custData.name || existingCustomer.name,
               fullName: custData.fullName || existingCustomer.fullName,
               nationalId: custData.nationalId || existingCustomer.nationalId,
-              openingBalance: custData.openingBalance || existingCustomer.openingBalance,
+              openingBalance: opBal || existingCustomer.openingBalance,
+              cachedBalance: opBal > 0 ? opBal : existingCustomer.cachedBalance,
               notes: custData.notes ? `${existingCustomer.notes || ''} | ${custData.notes}` : existingCustomer.notes,
             },
           });
@@ -295,7 +297,8 @@ export class ImportEngineService {
               phone: primaryPhone,
               nationalId: custData.nationalId,
               notes: custData.notes || 'تم الاستيراد من ملف Excel الماستر',
-              openingBalance: custData.openingBalance,
+              openingBalance: opBal,
+              cachedBalance: opBal,
               status: 'ACTIVE',
             },
           });
@@ -305,9 +308,31 @@ export class ImportEngineService {
 
         customerIdMap.set(custData.customerCode, customerId);
 
-        if (custData.openingBalance > 0) {
+        if (opBal > 0) {
           openingBalancesApplied++;
-          totalOpeningDebtEgp = Money.add(totalOpeningDebtEgp, custData.openingBalance);
+          totalOpeningDebtEgp = Money.add(totalOpeningDebtEgp, opBal);
+
+          const existingLedger = await tx.customerLedger.findFirst({
+            where: {
+              customerId,
+              transactionType: 'OPENING_BALANCE',
+            },
+          });
+
+          if (!existingLedger) {
+            await tx.customerLedger.create({
+              data: {
+                customerId,
+                transactionNumber: `OP-${custData.customerCode}`,
+                transactionType: 'OPENING_BALANCE',
+                description: 'رصيد افتتاحي (مديونية سابقة من ملف Excel)',
+                debit: opBal,
+                credit: 0,
+                balanceAfter: opBal,
+                createdBy: currentUserId,
+              },
+            });
+          }
         }
       }
       this.logger.log(

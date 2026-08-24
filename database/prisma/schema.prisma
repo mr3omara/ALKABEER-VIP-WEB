@@ -125,6 +125,7 @@ model User {
   dailyClosings       DailyClosing[]
   treasuryTransactions TreasuryTransaction[]
   ledgerEntries        CustomerLedger[]
+  companyLiabilityInstallments CompanyLiabilityInstallment[]
 
   @@map("users")
 }
@@ -239,8 +240,9 @@ model Company {
   createdAt           DateTime  @default(now()) @map("created_at")
   updatedAt           DateTime  @updatedAt @map("updated_at")
 
-  lines    Line[]
-  packages Package[]
+  lines       Line[]
+  packages    Package[]
+  liabilities CompanyLiability[]
 
   @@map("companies")
 }
@@ -367,6 +369,7 @@ model Sale {
   items                SaleItem[]
   payments             Payment[]
   treasuryTransactions TreasuryTransaction[]
+  paymentAllocations   PaymentAllocation[]
 
   @@index([customerId])
   @@index([saleDate])
@@ -425,17 +428,21 @@ model Payment {
 }
 
 model PaymentAllocation {
-  id        String   @id @default(uuid())
-  paymentId String   @map("payment_id")
-  chargeId  String   @map("charge_id")
-  amount    Int      // Whole EGP integer
-  createdAt DateTime @default(now()) @map("created_at")
+  id         String   @id @default(uuid())
+  paymentId  String   @map("payment_id")
+  chargeId   String?  @map("charge_id")
+  saleId     String?  @map("sale_id")
+  targetType String   @default("CHARGE") @map("target_type") // "CHARGE", "OPENING_BALANCE", "SALE", "CREDIT"
+  amount     Int      // Whole EGP integer
+  createdAt  DateTime @default(now()) @map("created_at")
 
-  payment Payment       @relation(fields: [paymentId], references: [id], onDelete: Restrict)
-  charge  MonthlyCharge @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+  payment Payment        @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  charge  MonthlyCharge? @relation(fields: [chargeId], references: [id], onDelete: SetNull)
+  sale    Sale?          @relation(fields: [saleId], references: [id], onDelete: SetNull)
 
   @@index([paymentId])
   @@index([chargeId])
+  @@index([saleId])
   @@map("payment_allocations")
 }
 
@@ -480,6 +487,7 @@ model TreasuryAccount {
 
   transactions TreasuryTransaction[]
   expenses     Expense[]
+  companyLiabilityInstallments CompanyLiabilityInstallment[]
 
   @@map("treasury_accounts")
 }
@@ -655,3 +663,51 @@ model CustomerLedger {
   @@index([transactionDate])
   @@map("customer_ledgers")
 }
+
+// ----------------------------------------------------
+// COMPANY LIABILITIES (B2B)
+// ----------------------------------------------------
+
+model CompanyLiability {
+  id              String   @id @default(uuid())
+  invoiceNumber   String   @unique @map("invoice_number")
+  companyId       String   @map("company_id")
+  billingMonth    String   @map("billing_month") // Format: "YYYY-MM"
+  dueDate         DateTime @map("due_date")
+  amount          Int      // Whole EGP integer
+  paidAmount      Int      @default(0) @map("paid_amount")
+  remainingAmount Int      @map("remaining_amount")
+  status          String   @default("UNPAID")
+  alertStatus     String   @default("NORMAL") @map("alert_status")
+  notes           String?
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  company      Company                       @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  installments CompanyLiabilityInstallment[]
+
+  @@index([companyId])
+  @@index([billingMonth])
+  @@index([status])
+  @@map("company_liabilities")
+}
+
+model CompanyLiabilityInstallment {
+  id                String        @id @default(uuid())
+  liabilityId       String        @map("liability_id")
+  amount            Int           // Whole EGP integer
+  paymentMethod     PaymentMethod @default(CASH) @map("payment_method")
+  treasuryAccountId String        @map("treasury_account_id")
+  notes             String?
+  createdBy         String?       @map("created_by")
+  createdAt         DateTime      @default(now()) @map("created_at")
+
+  liability       CompanyLiability @relation(fields: [liabilityId], references: [id], onDelete: Restrict)
+  treasuryAccount TreasuryAccount  @relation(fields: [treasuryAccountId], references: [id], onDelete: Restrict)
+  creator         User?            @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([liabilityId])
+  @@index([treasuryAccountId])
+  @@map("company_liability_installments")
+}
+

@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Put, Patch, Body, Param, Query, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { UsersService } from './users.service';
 import { CreateUserDto } from './dto/create-user.dto';
@@ -23,7 +23,7 @@ export class UsersController {
     @Body() dto: CreateUserDto,
     @CurrentUser() user: RequestUser,
   ) {
-    return this.usersService.create(dto, user.id);
+    return this.usersService.create(dto, user?.id);
   }
 
   @Get()
@@ -38,5 +38,38 @@ export class UsersController {
   @ApiOperation({ summary: 'Get user by ID' })
   async findOne(@Param('id') id: string) {
     return this.usersService.findOne(id);
+  }
+
+  @Put(':id')
+  @RequirePermissions(PERMISSIONS.USERS_MANAGE)
+  @ApiOperation({ summary: 'Update user profile details and roles' })
+  async update(
+    @Param('id') id: string,
+    @Body() dto: { fullName?: string; email?: string; roles?: string[] },
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.usersService.update(id, dto, user?.id);
+  }
+
+  @Put(':id/password')
+  @RequirePermissions(PERMISSIONS.USERS_MANAGE)
+  @ApiOperation({ summary: 'Change user password' })
+  async changePassword(
+    @Param('id') id: string,
+    @Body('password') password: string,
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.usersService.changePassword(id, password, user?.id);
+  }
+
+  @Patch(':id/status')
+  @RequirePermissions(PERMISSIONS.USERS_MANAGE)
+  @ApiOperation({ summary: 'Update user account status (ACTIVE, INACTIVE, BLOCKED)' })
+  async updateStatus(
+    @Param('id') id: string,
+    @Body('status') status: 'ACTIVE' | 'INACTIVE' | 'BLOCKED',
+    @CurrentUser() user: RequestUser,
+  ) {
+    return this.usersService.updateStatus(id, status, user?.id);
   }
 }

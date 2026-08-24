@@ -85,6 +85,7 @@ export class BackupService implements OnApplicationBootstrap {
     const [
       settings,
       companies,
+      packages,
       customers,
       lines,
       inventoryMovements,
@@ -97,12 +98,14 @@ export class BackupService implements OnApplicationBootstrap {
       treasuryTransactions,
       expenseCategories,
       expenses,
+      customerLedgers,
       dailyClosings,
       users,
       roles,
     ] = await Promise.all([
       this.prisma.setting.findMany(),
       this.prisma.company.findMany(),
+      this.prisma.package.findMany(),
       this.prisma.customer.findMany(),
       this.prisma.line.findMany(),
       this.prisma.inventoryMovement.findMany(),
@@ -115,6 +118,7 @@ export class BackupService implements OnApplicationBootstrap {
       this.prisma.treasuryTransaction.findMany(),
       this.prisma.expenseCategory.findMany(),
       this.prisma.expense.findMany(),
+      this.prisma.customerLedger.findMany(),
       this.prisma.dailyClosing.findMany(),
       this.prisma.user.findMany({ select: { id: true, username: true, email: true, fullName: true, status: true, createdAt: true } }),
       this.prisma.role.findMany({ include: { rolePermissions: { include: { permission: true } } } }),
@@ -178,9 +182,54 @@ BEGIN;
       sqlContent += `INSERT INTO companies (id, name, code, color, payment_day, status, created_at, updated_at) VALUES ('${c.id}', '${c.name.replace(/'/g, "''")}', '${c.code}', ${c.color ? `'${c.color}'` : 'NULL'}, ${c.paymentDay}, '${c.status}', '${c.createdAt.toISOString()}', '${c.updatedAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
     }
 
+    // SQL dump lines for packages
+    for (const p of packages) {
+      sqlContent += `INSERT INTO packages (id, name, company_id, face_value, cost_price, selling_price, status, created_at, updated_at) VALUES ('${p.id}', '${p.name.replace(/'/g, "''")}', ${p.companyId ? `'${p.companyId}'` : 'NULL'}, ${p.faceValue}, ${p.costPrice}, ${p.sellingPrice}, '${p.status}', '${p.createdAt.toISOString()}', '${p.updatedAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
+    }
+
     // SQL dump lines for customers
     for (const cu of customers) {
-      sqlContent += `INSERT INTO customers (id, customer_code, name, phone, national_id, address, notes, status, created_at, updated_at) VALUES ('${cu.id}', '${cu.customerCode}', '${cu.name.replace(/'/g, "''")}', '${cu.phone}', ${cu.nationalId ? `'${cu.nationalId}'` : 'NULL'}, ${cu.address ? `'${cu.address.replace(/'/g, "''")}'` : 'NULL'}, ${cu.notes ? `'${cu.notes.replace(/'/g, "''")}'` : 'NULL'}, '${cu.status}', '${cu.createdAt.toISOString()}', '${cu.updatedAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
+      sqlContent += `INSERT INTO customers (id, customer_code, name, phone, national_id, opening_balance, cached_balance, status, created_at, updated_at) VALUES ('${cu.id}', '${cu.customerCode}', '${cu.name.replace(/'/g, "''")}', '${cu.phone}', ${cu.nationalId ? `'${cu.nationalId}'` : 'NULL'}, ${cu.openingBalance}, ${cu.cachedBalance}, '${cu.status}', '${cu.createdAt.toISOString()}', '${cu.updatedAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
+    }
+
+    // SQL dump lines for lines
+    for (const l of lines) {
+      sqlContent += `INSERT INTO lines (id, phone_number, company_id, customer_id, monthly_package, purchase_price, sale_price, status, created_at, updated_at) VALUES ('${l.id}', '${l.phoneNumber}', '${l.companyId}', ${l.customerId ? `'${l.customerId}'` : 'NULL'}, ${l.monthlyPackage}, ${l.purchasePrice}, ${l.salePrice}, '${l.status}', '${l.createdAt.toISOString()}', '${l.updatedAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
+    }
+
+    // SQL dump lines for sales
+    for (const sa of sales) {
+      sqlContent += `INSERT INTO sales (id, sale_number, customer_id, subtotal, discount, total, paid, remaining, status, created_at, updated_at) VALUES ('${sa.id}', '${sa.saleNumber}', '${sa.customerId}', ${sa.subtotal}, ${sa.discount}, ${sa.total}, ${sa.paid}, ${sa.remaining}, '${sa.status}', '${sa.createdAt.toISOString()}', '${sa.updatedAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
+    }
+
+    // SQL dump lines for payments
+    for (const py of payments) {
+      sqlContent += `INSERT INTO payments (id, payment_number, customer_id, sale_id, amount, payment_method, is_reversed, created_at) VALUES ('${py.id}', '${py.paymentNumber}', '${py.customerId}', ${py.saleId ? `'${py.saleId}'` : 'NULL'}, ${py.amount}, '${py.paymentMethod}', ${py.isReversed}, '${py.createdAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
+    }
+
+    // SQL dump lines for monthly charges
+    for (const mc of monthlyCharges) {
+      sqlContent += `INSERT INTO monthly_charges (id, line_id, customer_id, billing_month, due_date, amount, paid_amount, status, created_at, updated_at) VALUES ('${mc.id}', '${mc.lineId}', '${mc.customerId}', '${mc.billingMonth}', '${mc.dueDate.toISOString()}', ${mc.amount}, ${mc.paidAmount}, '${mc.status}', '${mc.createdAt.toISOString()}', '${mc.updatedAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
+    }
+
+    // SQL dump lines for treasury accounts
+    for (const ta of treasuryAccounts) {
+      sqlContent += `INSERT INTO treasury_accounts (id, name, type, opening_balance, current_balance, status, created_at, updated_at) VALUES ('${ta.id}', '${ta.name.replace(/'/g, "''")}', '${ta.type}', ${ta.openingBalance}, ${ta.currentBalance}, '${ta.status}', '${ta.createdAt.toISOString()}', '${ta.updatedAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
+    }
+
+    // SQL dump lines for expenses
+    for (const ex of expenses) {
+      sqlContent += `INSERT INTO expenses (id, expense_number, category_id, amount, expense_date, payment_method, treasury_account_id, description, created_at) VALUES ('${ex.id}', '${ex.expenseNumber}', '${ex.categoryId}', ${ex.amount}, '${ex.expenseDate.toISOString()}', '${ex.paymentMethod}', '${ex.treasuryAccountId}', '${ex.description.replace(/'/g, "''")}', '${ex.createdAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
+    }
+
+    // SQL dump lines for customer ledgers
+    for (const cl of customerLedgers) {
+      sqlContent += `INSERT INTO customer_ledgers (id, customer_id, transaction_number, transaction_type, description, debit, credit, balance_after, transaction_date, created_at) VALUES ('${cl.id}', '${cl.customerId}', '${cl.transactionNumber}', '${cl.transactionType}', '${cl.description.replace(/'/g, "''")}', ${cl.debit}, ${cl.credit}, ${cl.balanceAfter}, '${cl.transactionDate.toISOString()}', '${cl.createdAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
+    }
+
+    // SQL dump lines for daily closings
+    for (const dc of dailyClosings) {
+      sqlContent += `INSERT INTO daily_closings (id, business_date, opening_balance, total_sales, total_payments, total_expenses, expected_balance, actual_balance, difference, status, created_at, updated_at) VALUES ('${dc.id}', '${dc.businessDate}', ${dc.openingBalance}, ${dc.totalSales}, ${dc.totalPayments}, ${dc.totalExpenses}, ${dc.expectedBalance}, ${dc.actualBalance}, ${dc.difference}, '${dc.status}', '${dc.createdAt.toISOString()}', '${dc.updatedAt.toISOString()}') ON CONFLICT (id) DO NOTHING;\n`;
     }
 
     sqlContent += `\nCOMMIT;\n`;

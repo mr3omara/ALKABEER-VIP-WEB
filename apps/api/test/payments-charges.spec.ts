@@ -79,17 +79,17 @@ describe('Payments & FIFO Allocation Engine', () => {
     // Verify 3 allocations were made: 100 for July, 100 for August, 50 for September
     expect(mockPrisma.paymentAllocation.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { paymentId: 'pay-1', chargeId: 'ch-july', amount: 100 },
+        data: expect.objectContaining({ paymentId: 'pay-1', chargeId: 'ch-july', amount: 100 }),
       }),
     );
     expect(mockPrisma.paymentAllocation.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { paymentId: 'pay-1', chargeId: 'ch-august', amount: 100 },
+        data: expect.objectContaining({ paymentId: 'pay-1', chargeId: 'ch-august', amount: 100 }),
       }),
     );
     expect(mockPrisma.paymentAllocation.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: { paymentId: 'pay-1', chargeId: 'ch-september', amount: 50 },
+        data: expect.objectContaining({ paymentId: 'pay-1', chargeId: 'ch-september', amount: 50 }),
       }),
     );
 

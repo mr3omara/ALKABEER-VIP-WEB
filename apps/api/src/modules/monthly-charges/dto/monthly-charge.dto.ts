@@ -13,10 +13,10 @@ export class CreateMonthlyChargeDto {
   @Matches(/^\d{4}-(0[1-9]|1[0-2])$/, { message: 'Billing month must be formatted as YYYY-MM' })
   billingMonth: string;
 
-  @ApiProperty({ example: '2026-08-15', description: 'Due date' })
-  @IsNotEmpty()
+  @ApiPropertyOptional({ example: '2026-08-15', description: 'Due date' })
+  @IsOptional()
   @IsDateString()
-  dueDate: string;
+  dueDate?: string;
 
   @ApiProperty({ example: 100, description: 'Obligation amount in whole EGP' })
   @IsNotEmpty()

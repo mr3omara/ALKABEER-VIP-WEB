@@ -11,7 +11,7 @@ import {
   OpenDailyClosingDto,
   ReopenDailyClosingDto,
 } from './dto/daily-closing.dto';
-import { AuditAction, DailyClosingStatus, Money } from '@alkabeer/shared';
+import { AuditAction, DailyClosingStatus, Money, PaymentMethod } from '@alkabeer/shared';
 
 @Injectable()
 export class DailyClosingService {
@@ -19,6 +19,35 @@ export class DailyClosingService {
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
   ) {}
+
+  /**
+   * Helper to dynamically calculate Egypt (Africa/Cairo) start & end of day UTC Date objects
+   * taking Daylight Saving Time (DST) into account dynamically via Intl API.
+   */
+  private getEgyptDayRange(businessDate: string): { startDate: Date; endDate: Date } {
+    const [year, month, day] = businessDate.split('-').map(Number);
+    const tempDate = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+    
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Africa/Cairo',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+    
+    const parts = formatter.formatToParts(tempDate);
+    const hourVal = parseInt(parts.find((p) => p.type === 'hour')?.value || '12', 10);
+    const offsetHours = hourVal - 12;
+
+    const startDate = new Date(Date.UTC(year, month - 1, day, 0 - offsetHours, 0, 0, 0));
+    const endDate = new Date(Date.UTC(year, month - 1, day, 23 - offsetHours, 59, 59, 999));
+
+    return { startDate, endDate };
+  }
 
   async openDay(dto: OpenDailyClosingDto, currentUserId?: string) {
     Money.assertNonNegative(dto.openingBalance || 0, 'Opening Balance');
@@ -73,9 +102,8 @@ export class DailyClosingService {
       throw new BadRequestException(`Business day [${businessDate}] is already closed`);
     }
 
-    // Compute start and end of business date in UTC
-    const startDate = new Date(`${businessDate}T00:00:00.000Z`);
-    const endDate = new Date(`${businessDate}T23:59:59.999Z`);
+    // Compute start and end of business date in Egypt Local Time (Africa/Cairo)
+    const { startDate, endDate } = this.getEgyptDayRange(businessDate);
 
     const [sales, payments, expenses] = await Promise.all([
       this.prisma.sale.findMany({
@@ -101,12 +129,25 @@ export class DailyClosingService {
     const totalPayments = payments.reduce((acc, p) => Money.add(acc, p.amount), 0);
     const totalExpenses = expenses.reduce((acc, e) => Money.add(acc, e.amount), 0);
 
-    // Expected physical balance = opening + payments - expenses
+    // Detailed breakdown by payment method
+    const cashPayments = payments.filter((p) => p.paymentMethod === PaymentMethod.CASH).reduce((a, p) => Money.add(a, p.amount), 0);
+    const bankPayments = payments.filter((p) => p.paymentMethod === PaymentMethod.BANK).reduce((a, p) => Money.add(a, p.amount), 0);
+    const walletPayments = payments.filter((p) => p.paymentMethod === PaymentMethod.WALLET).reduce((a, p) => Money.add(a, p.amount), 0);
+
+    const cashExpenses = expenses.filter((e) => e.paymentMethod === PaymentMethod.CASH).reduce((a, e) => Money.add(a, e.amount), 0);
+    const bankExpenses = expenses.filter((e) => e.paymentMethod === PaymentMethod.BANK).reduce((a, e) => Money.add(a, e.amount), 0);
+    const walletExpenses = expenses.filter((e) => e.paymentMethod === PaymentMethod.WALLET).reduce((a, e) => Money.add(a, e.amount), 0);
+
+    const expectedCashBalance = Money.subtract(Money.add(closing.openingBalance, cashPayments), cashExpenses);
+
+    // Expected physical cash drawer balance = opening + cashPayments - cashExpenses
     const expectedBalance = Money.subtract(
       Money.add(closing.openingBalance, totalPayments),
       totalExpenses,
     );
     const difference = Money.subtract(dto.actualBalance, expectedBalance);
+
+    const breakdownNotes = `[Breakdown] Cash: +${cashPayments}/-${cashExpenses} (ExpCash: ${expectedCashBalance}) | Bank: +${bankPayments}/-${bankExpenses} | Wallet: +${walletPayments}/-${walletExpenses}`;
 
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.dailyClosing.update({
@@ -121,7 +162,7 @@ export class DailyClosingService {
           difference,
           status: DailyClosingStatus.CLOSED,
           closedBy: currentUserId,
-          notes: dto.notes ? `${closing.notes || ''} | Closed: ${dto.notes}` : closing.notes,
+          notes: dto.notes ? `${closing.notes || ''} | ${breakdownNotes} | Closed: ${dto.notes}` : `${closing.notes || ''} | ${breakdownNotes}`,
         },
       });
 
@@ -135,13 +176,27 @@ export class DailyClosingService {
             expectedBalance,
             actualBalance: dto.actualBalance,
             difference,
+            cashPayments,
+            bankPayments,
+            walletPayments,
           },
           userId: currentUserId,
         },
         tx,
       );
 
-      return updated;
+      return {
+        ...updated,
+        breakdown: {
+          cashPayments,
+          bankPayments,
+          walletPayments,
+          cashExpenses,
+          bankExpenses,
+          walletExpenses,
+          expectedCashBalance,
+        },
+      };
     });
   }
 

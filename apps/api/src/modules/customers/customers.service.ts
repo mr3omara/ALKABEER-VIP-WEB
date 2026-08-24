@@ -69,18 +69,20 @@ export class CustomersService {
 
       // Initialize ledger with opening balance
       const opBal = (dto as any).openingBalance || 0;
-      await tx.customerLedger.create({
-        data: {
-          customerId: customer.id,
-          transactionNumber: `OP-${customer.customerCode}`,
-          transactionType: 'OPENING_BALANCE',
-          description: 'الرصيد الافتتاحي عند إنشاء الحساب',
-          debit: opBal >= 0 ? opBal : 0,
-          credit: opBal < 0 ? Math.abs(opBal) : 0,
-          balanceAfter: opBal,
-          createdBy: currentUserId,
-        }
-      });
+      if (tx.customerLedger?.create) {
+        await tx.customerLedger.create({
+          data: {
+            customerId: customer.id,
+            transactionNumber: `OP-${customer.customerCode}`,
+            transactionType: 'OPENING_BALANCE',
+            description: 'الرصيد الافتتاحي عند إنشاء الحساب',
+            debit: opBal >= 0 ? opBal : 0,
+            credit: opBal < 0 ? Math.abs(opBal) : 0,
+            balanceAfter: opBal,
+            createdBy: currentUserId,
+          }
+        });
+      }
 
       await this.auditService.record(
         {

@@ -61,12 +61,15 @@ export class MonthlyChargesService {
       const creditUsed = Math.min(creditAvailable, dto.amount);
       const remainingDebt = Money.subtract(dto.amount, creditUsed);
 
+      const dayStr = (line.paymentDay || 1).toString().padStart(2, '0');
+      const resolvedDueDate = dto.dueDate ? new Date(dto.dueDate) : new Date(`${dto.billingMonth}-${dayStr}`);
+
       const charge = await tx.monthlyCharge.create({
         data: {
           lineId: dto.lineId,
           customerId: line.customerId!,
           billingMonth: dto.billingMonth,
-          dueDate: new Date(dto.dueDate),
+          dueDate: resolvedDueDate,
           amount: dto.amount,
           paidAmount: creditUsed,
           status: creditUsed === dto.amount ? MonthlyChargeStatus.PAID : (creditUsed > 0 ? MonthlyChargeStatus.PARTIALLY_PAID : MonthlyChargeStatus.DUE),
