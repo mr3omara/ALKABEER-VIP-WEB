@@ -1,0 +1,111 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 40 45% 94%; /* #F8F3E6 Distinct Warm Ivory Canvas */
+  --foreground: 217 65% 11%; /* #0A192F Deep Navy Primary Text */
+  --card: 40 60% 99%; /* #FFFDF9 Cream Card Surface */
+  --card-foreground: 217 65% 11%;
+  --primary: 40 50% 56%; /* #C5A059 Restrained Luxury Gold */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 40 35% 91%; /* #F2EBDC Subtle Warm Surface */
+  --secondary-foreground: 217 65% 11%;
+  --muted: 40 35% 91%;
+  --muted-foreground: 215 17% 35%; /* #4A5568 Warm Slate / Muted Navy */
+  --accent: 40 35% 90%;
+  --accent-foreground: 217 65% 11%;
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 37 30% 86%; /* #E8DECE Subtle Warm Border */
+  --input: 37 30% 86%;
+  --ring: 40 50% 56%;
+  --radius: 0.75rem;
+}
+
+.dark {
+  --background: 218 51% 7%; /* #070F1E Dark Canvas */
+  --foreground: 210 40% 96%; /* #F1F5F9 Soft Off-White */
+  --card: 216 62% 14%; /* #0E203C Elevated Card Surface */
+  --card-foreground: 210 40% 96%;
+  --primary: 46 65% 52%; /* #D4AF37 Bright Gold Accent */
+  --primary-foreground: 0 0% 100%;
+  --secondary: 216 48% 18%;
+  --secondary-foreground: 210 40% 98%;
+  --muted: 216 48% 18%;
+  --muted-foreground: 215 20% 70%;
+  --accent: 216 48% 18%;
+  --accent-foreground: 210 40% 98%;
+  --destructive: 0 62% 30%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 214 52% 24%; /* #1E3A5F Soft Border */
+  --input: 214 52% 24%;
+  --ring: 46 65% 52%;
+}
+
+::selection {
+  background-color: #FDE047;
+  color: #0A192F;
+}
+
+::-moz-selection {
+  background-color: #FDE047;
+  color: #0A192F;
+}
+
+.dark ::selection {
+  background-color: #D4AF37;
+  color: #FFFFFF !important;
+}
+
+.dark ::-moz-selection {
+  background-color: #D4AF37;
+  color: #FFFFFF !important;
+}
+
+body {
+  font-family: 'Tajawal', -apple-system, BlinkMacSystemFont, sans-serif;
+  background-color: #F8F3E6; /* Distinct Warm Ivory Canvas */
+  color: #0A192F; /* Deep Navy Primary Text */
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.dark body {
+  background-color: #070F1E;
+  color: #F1F5F9;
+}
+
+h1, h2, .font-kufi, .font-display, .font-heading {
+  font-family: 'Noto Kufi Arabic', 'Tajawal', sans-serif;
+}
+
+/* Custom Scrollbars */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(10, 25, 47, 0.2);
+  border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(10, 25, 47, 0.4);
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(30, 58, 95, 0.6);
+}
+
+.dark .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(42, 77, 122, 0.8);
+}

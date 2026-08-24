@@ -1,0 +1,12 @@
+{
+  "name": "@alkabeer/config",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "build": "echo Config package ready"
+  },
+  "files": [
+    "tsconfig.base.json"
+  ]
+}

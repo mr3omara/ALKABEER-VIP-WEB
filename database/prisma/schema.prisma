@@ -1,0 +1,657 @@
+// Prisma Schema for ALKABEER VIP WEB
+// Target Database: PostgreSQL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------
+// ENUMS
+// ----------------------------------------------------
+
+enum CustomerStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+}
+
+enum LineStatus {
+  IN_STOCK
+  RESERVED
+  SOLD
+  ACTIVE
+  SUSPENDED
+  CANCELLED
+  RETURNED
+}
+
+enum InventoryMovementType {
+  PURCHASE
+  ADD
+  RESERVE
+  RELEASE
+  SALE
+  RETURN
+  ADJUSTMENT
+  TRANSFER
+}
+
+enum SaleStatus {
+  COMPLETED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK
+  WALLET
+  OTHER
+}
+
+enum MonthlyChargeStatus {
+  DUE
+  PARTIALLY_PAID
+  PAID
+  WAIVED
+  CANCELLED
+}
+
+enum TreasuryAccountType {
+  CASH
+  BANK
+  WALLET
+}
+
+enum TreasuryDirection {
+  IN
+  OUT
+}
+
+enum TreasuryTransactionType {
+  SALE_PAYMENT
+  EXPENSE
+  REFUND
+  ADJUSTMENT
+  OPENING_BALANCE
+  TRANSFER
+}
+
+enum DailyClosingStatus {
+  OPEN
+  CLOSED
+  REOPENED
+}
+
+enum AuditAction {
+  LOGIN
+  LOGOUT
+  CREATE
+  UPDATE
+  DELETE
+  REVERSAL
+  STATUS_CHANGE
+  DAILY_CLOSE
+  DAILY_REOPEN
+  EXPORT
+}
+
+// ----------------------------------------------------
+// AUTH & RBAC
+// ----------------------------------------------------
+
+model User {
+  id           String     @id @default(uuid())
+  username     String     @unique
+  email        String     @unique
+  passwordHash String     @map("password_hash")
+  fullName     String     @map("full_name")
+  status       String     @default("ACTIVE")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  userRoles           UserRole[]
+  auditLogs           AuditLog[]
+  sales               Sale[]
+  payments            Payment[]
+  expenses            Expense[]
+  lineHistory         LineHistory[]
+  inventoryMovements  InventoryMovement[]
+  dailyClosings       DailyClosing[]
+  treasuryTransactions TreasuryTransaction[]
+  ledgerEntries        CustomerLedger[]
+
+  @@map("users")
+}
+
+model Role {
+  id          String           @id @default(uuid())
+  name        String           @unique
+  description String?
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  userRoles        UserRole[]
+  rolePermissions  RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String           @id @default(uuid())
+  key         String           @unique
+  name        String
+  module      String
+  description String?
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model UserRole {
+  userId     String   @map("user_id")
+  roleId     String   @map("role_id")
+  assignedAt DateTime @default(now()) @map("assigned_at")
+  assignedBy String?  @map("assigned_by")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       String     @map("role_id")
+  permissionId String     @map("permission_id")
+  assignedAt   DateTime   @default(now()) @map("assigned_at")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// ----------------------------------------------------
+// CUSTOMERS
+// ----------------------------------------------------
+
+model Customer {
+  id                String         @id @default(uuid())
+  customerCode      String         @unique @map("customer_code")
+  name              String
+  shortName         String?        @map("short_name")
+  fullName          String?        @map("full_name")
+  phone             String
+  contactNumber     String?        @map("contact_number")
+  motherGrandpaName String?        @map("mother_grandpa_name")
+  nationalId        String?        @map("national_id")
+  address           String?
+  joinDate          DateTime?      @map("join_date")
+  notes             String?
+  openingBalance    Int            @default(0) @map("opening_balance") // Whole EGP integer
+  cachedBalance     Int            @default(0) @map("cached_balance")  // Positive = Debt, Negative = Credit
+  status            CustomerStatus @default(ACTIVE)
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+  deletedAt         DateTime?      @map("deleted_at")
+
+  lines           Line[]
+  sales           Sale[]
+  payments        Payment[]
+  monthlyCharges  MonthlyCharge[]
+  lineHistoryOld  LineHistory[]   @relation("OldCustomerHistory")
+  lineHistoryNew  LineHistory[]   @relation("NewCustomerHistory")
+  ledgerEntries   CustomerLedger[]
+
+  @@index([phone])
+  @@index([name])
+  @@index([status])
+  @@map("customers")
+}
+
+// ----------------------------------------------------
+// COMPANIES, PACKAGES & LINES
+// ----------------------------------------------------
+
+model Company {
+  id                  String    @id @default(uuid())
+  name                String    @unique
+  code                String    @unique
+  color               String?
+  paymentDay          Int       @default(1) @map("payment_day")
+  renewalDate         DateTime? @map("renewal_date")
+  sponsorName         String?   @map("sponsor_name")
+  sponsorPhone        String?   @map("sponsor_phone")
+  accountManagerName  String?   @map("account_manager_name")
+  accountManagerPhone String?   @map("account_manager_phone")
+  contractNumber      String?   @map("contract_number")
+  notes               String?
+  status              String    @default("ACTIVE")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  lines    Line[]
+  packages Package[]
+
+  @@map("companies")
+}
+
+model Package {
+  id           String   @id @default(uuid())
+  name         String
+  companyId    String?  @map("company_id")
+  faceValue    Int      @default(0) @map("face_value") // Whole EGP integer
+  costPrice    Int      @default(0) @map("cost_price") // Whole EGP integer
+  sellingPrice Int      @default(0) @map("selling_price") // Whole EGP integer
+  details      String?
+  status       String   @default("ACTIVE")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+
+  @@unique([name, sellingPrice])
+  @@index([companyId])
+  @@map("packages")
+}
+
+model Line {
+  id                String     @id @default(uuid())
+  phoneNumber       String     @unique @map("phone_number")
+  companyId         String     @map("company_id")
+  customerId        String?    @map("customer_id")
+  monthlyPackage    Int        @default(0) @map("monthly_package")    // Whole EGP integer
+  additionalPackage Int        @default(0) @map("additional_package") // Whole EGP integer
+  activationDate    DateTime?  @map("activation_date")
+  renewalDate       DateTime?  @map("renewal_date")
+  paymentDay        Int        @default(1) @map("payment_day")
+  purchasePrice     Int        @default(0) @map("purchase_price")     // Whole EGP integer
+  salePrice         Int        @default(0) @map("sale_price")         // Whole EGP integer
+  status            LineStatus @default(IN_STOCK)
+  notes             String?
+  createdAt         DateTime   @default(now()) @map("created_at")
+  updatedAt         DateTime   @updatedAt @map("updated_at")
+
+  company            Company             @relation(fields: [companyId], references: [id], onDelete: Restrict)
+  customer           Customer?           @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  lineHistory        LineHistory[]
+  inventoryMovements InventoryMovement[]
+  saleItems          SaleItem[]
+  monthlyCharges     MonthlyCharge[]
+
+  @@index([companyId])
+  @@index([customerId])
+  @@index([status])
+  @@map("lines")
+}
+
+model LineHistory {
+  id            String   @id @default(uuid())
+  lineId        String   @map("line_id")
+  action        String
+  oldCustomerId String?  @map("old_customer_id")
+  newCustomerId String?  @map("new_customer_id")
+  oldStatus     String   @map("old_status")
+  newStatus     String   @map("new_status")
+  referenceType String?  @map("reference_type")
+  referenceId   String?  @map("reference_id")
+  notes         String?
+  createdBy     String?  @map("created_by")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  line        Line      @relation(fields: [lineId], references: [id], onDelete: Restrict)
+  oldCustomer Customer? @relation("OldCustomerHistory", fields: [oldCustomerId], references: [id], onDelete: SetNull)
+  newCustomer Customer? @relation("NewCustomerHistory", fields: [newCustomerId], references: [id], onDelete: SetNull)
+  creator     User?     @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([lineId])
+  @@index([createdAt])
+  @@map("line_history")
+}
+
+// ----------------------------------------------------
+// INVENTORY
+// ----------------------------------------------------
+
+model InventoryMovement {
+  id            String                @id @default(uuid())
+  lineId        String                @map("line_id")
+  movementType  InventoryMovementType @map("movement_type")
+  quantity      Int                   @default(1)
+  referenceType String?               @map("reference_type")
+  referenceId   String?               @map("reference_id")
+  notes         String?
+  createdBy     String?               @map("created_by")
+  createdAt     DateTime              @default(now()) @map("created_at")
+
+  line    Line  @relation(fields: [lineId], references: [id], onDelete: Restrict)
+  creator User? @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([lineId])
+  @@index([movementType])
+  @@index([createdAt])
+  @@map("inventory_movements")
+}
+
+// ----------------------------------------------------
+// SALES
+// ----------------------------------------------------
+
+model Sale {
+  id         String     @id @default(uuid())
+  saleNumber String     @unique @map("sale_number")
+  customerId String     @map("customer_id")
+  saleDate   DateTime   @default(now()) @map("sale_date")
+  subtotal   Int        // Whole EGP integer
+  discount   Int        @default(0) // Whole EGP integer
+  total      Int        // Whole EGP integer
+  paid       Int        @default(0) // Whole EGP integer
+  remaining  Int        @default(0) // Whole EGP integer
+  status     SaleStatus @default(COMPLETED)
+  notes      String?
+  createdBy  String?    @map("created_by")
+  createdAt  DateTime   @default(now()) @map("created_at")
+  updatedAt  DateTime   @updatedAt @map("updated_at")
+
+  customer             Customer              @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  creator              User?                 @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+  items                SaleItem[]
+  payments             Payment[]
+  treasuryTransactions TreasuryTransaction[]
+
+  @@index([customerId])
+  @@index([saleDate])
+  @@index([status])
+  @@map("sales")
+}
+
+model SaleItem {
+  id          String  @id @default(uuid())
+  saleId      String  @map("sale_id")
+  lineId      String  @map("line_id")
+  description String?
+  quantity    Int     @default(1)
+  unitPrice   Int     @map("unit_price") // Whole EGP integer
+  discount    Int     @default(0)        // Whole EGP integer
+  total       Int                        // Whole EGP integer
+
+  sale Sale @relation(fields: [saleId], references: [id], onDelete: Restrict)
+  line Line @relation(fields: [lineId], references: [id], onDelete: Restrict)
+
+  @@index([saleId])
+  @@index([lineId])
+  @@map("sale_items")
+}
+
+// ----------------------------------------------------
+// PAYMENTS & MONTHLY CHARGES
+// ----------------------------------------------------
+
+model Payment {
+  id             String        @id @default(uuid())
+  paymentNumber  String        @unique @map("payment_number")
+  customerId     String        @map("customer_id")
+  saleId         String?       @map("sale_id")
+  amount         Int           // Positive whole EGP integer
+  paymentMethod  PaymentMethod @default(CASH) @map("payment_method")
+  paymentDate    DateTime      @default(now()) @map("payment_date")
+  reference      String?
+  notes          String?
+  isReversed     Boolean       @default(false) @map("is_reversed")
+  reversalOfId   String?       @unique @map("reversal_of_id")
+  reversalReason String?       @map("reversal_reason")
+  createdBy      String?       @map("created_by")
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  customer             Customer              @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  sale                 Sale?                 @relation(fields: [saleId], references: [id], onDelete: SetNull)
+  creator              User?                 @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+  allocations          PaymentAllocation[]
+  treasuryTransactions TreasuryTransaction[]
+
+  @@index([customerId])
+  @@index([saleId])
+  @@index([paymentDate])
+  @@map("payments")
+}
+
+model PaymentAllocation {
+  id        String   @id @default(uuid())
+  paymentId String   @map("payment_id")
+  chargeId  String   @map("charge_id")
+  amount    Int      // Whole EGP integer
+  createdAt DateTime @default(now()) @map("created_at")
+
+  payment Payment       @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  charge  MonthlyCharge @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+
+  @@index([paymentId])
+  @@index([chargeId])
+  @@map("payment_allocations")
+}
+
+model MonthlyCharge {
+  id           String              @id @default(uuid())
+  lineId       String              @map("line_id")
+  customerId   String              @map("customer_id")
+  billingMonth String              @map("billing_month") // Format: "YYYY-MM"
+  dueDate      DateTime            @map("due_date")
+  amount       Int                 // Whole EGP integer
+  paidAmount   Int                 @default(0) @map("paid_amount") // Whole EGP integer
+  status       MonthlyChargeStatus @default(DUE)
+  notes        String?
+  createdAt    DateTime            @default(now()) @map("created_at")
+  updatedAt    DateTime            @updatedAt @map("updated_at")
+
+  line        Line                @relation(fields: [lineId], references: [id], onDelete: Restrict)
+  customer    Customer            @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  allocations PaymentAllocation[]
+
+  @@unique([lineId, billingMonth])
+  @@index([lineId])
+  @@index([customerId])
+  @@index([dueDate])
+  @@index([status])
+  @@map("monthly_charges")
+}
+
+// ----------------------------------------------------
+// TREASURY & EXPENSES
+// ----------------------------------------------------
+
+model TreasuryAccount {
+  id             String              @id @default(uuid())
+  name           String              @unique
+  type           TreasuryAccountType @default(CASH)
+  openingBalance Int                 @default(0) @map("opening_balance") // Whole EGP integer
+  currentBalance Int                 @default(0) @map("current_balance") // Whole EGP integer
+  status         String              @default("ACTIVE")
+  createdAt      DateTime            @default(now()) @map("created_at")
+  updatedAt      DateTime            @updatedAt @map("updated_at")
+
+  transactions TreasuryTransaction[]
+  expenses     Expense[]
+
+  @@map("treasury_accounts")
+}
+
+model TreasuryTransaction {
+  id                String                  @id @default(uuid())
+  transactionNumber String                  @unique @map("transaction_number")
+  transactionType   TreasuryTransactionType @map("transaction_type")
+  direction         TreasuryDirection
+  amount            Int                     // Positive whole EGP integer
+  accountId         String                  @map("account_id")
+  paymentId         String?                 @map("payment_id")
+  expenseId         String?                 @map("expense_id")
+  saleId            String?                 @map("sale_id")
+  description       String?
+  transactionDate   DateTime                @default(now()) @map("transaction_date")
+  createdBy         String?                 @map("created_by")
+  createdAt         DateTime                @default(now()) @map("created_at")
+
+  creator         User?           @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+  treasuryAccount TreasuryAccount @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  payment         Payment?        @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  expense         Expense?        @relation(fields: [expenseId], references: [id], onDelete: SetNull)
+  sale            Sale?           @relation(fields: [saleId], references: [id], onDelete: SetNull)
+
+  @@index([accountId])
+  @@index([transactionDate])
+  @@index([transactionType])
+  @@map("treasury_transactions")
+}
+
+model ExpenseCategory {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  status      String   @default("ACTIVE")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  expenses Expense[]
+
+  @@map("expense_categories")
+}
+
+model Expense {
+  id                String        @id @default(uuid())
+  expenseNumber     String        @unique @map("expense_number")
+  categoryId        String        @map("category_id")
+  amount            Int           // Positive whole EGP integer
+  expenseDate       DateTime      @default(now()) @map("expense_date")
+  paymentMethod     PaymentMethod @default(CASH) @map("payment_method")
+  treasuryAccountId String        @map("treasury_account_id")
+  description       String
+  createdBy         String?       @map("created_by")
+  createdAt         DateTime      @default(now()) @map("created_at")
+
+  category             ExpenseCategory       @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  treasuryAccount      TreasuryAccount       @relation(fields: [treasuryAccountId], references: [id], onDelete: Restrict)
+  creator              User?                 @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+  treasuryTransactions TreasuryTransaction[]
+
+  @@index([categoryId])
+  @@index([treasuryAccountId])
+  @@index([expenseDate])
+  @@map("expenses")
+}
+
+// ----------------------------------------------------
+// DAILY CLOSINGS & AUDIT
+// ----------------------------------------------------
+
+model DailyClosing {
+  id              String             @id @default(uuid())
+  businessDate    String             @unique @map("business_date") // Format: "YYYY-MM-DD"
+  openedAt        DateTime           @default(now()) @map("opened_at")
+  closedAt        DateTime?          @map("closed_at")
+  openingBalance  Int                @default(0) @map("opening_balance")  // Whole EGP integer
+  totalSales      Int                @default(0) @map("total_sales")      // Whole EGP integer
+  totalPayments   Int                @default(0) @map("total_payments")   // Whole EGP integer
+  totalExpenses   Int                @default(0) @map("total_expenses")   // Whole EGP integer
+  expectedBalance Int                @default(0) @map("expected_balance") // Whole EGP integer
+  actualBalance   Int                @default(0) @map("actual_balance")   // Whole EGP integer
+  difference      Int                @default(0)                          // Whole EGP integer
+  status          DailyClosingStatus @default(OPEN)
+  notes           String?
+  closedBy        String?            @map("closed_by")
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+
+  closer User? @relation(fields: [closedBy], references: [id], onDelete: SetNull)
+
+  @@index([businessDate])
+  @@index([status])
+  @@map("daily_closings")
+}
+
+model AuditLog {
+  id         String      @id @default(uuid())
+  userId     String?     @map("user_id")
+  action     AuditAction
+  entityType String      @map("entity_type")
+  entityId   String?     @map("entity_id")
+  oldData    String?     @map("old_data") // JSON serialized snapshot
+  newData    String?     @map("new_data") // JSON serialized snapshot
+  ipAddress  String?     @map("ip_address")
+  userAgent  String?     @map("user_agent")
+  createdAt  DateTime    @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([action])
+  @@map("audit_logs")
+}
+
+// ----------------------------------------------------
+// SETTINGS & BACKUP LOGS
+// ----------------------------------------------------
+
+model Setting {
+  key         String   @id
+  value       String
+  description String?
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("settings")
+}
+
+model BackupLog {
+  id          String   @id @default(uuid())
+  filename    String
+  sizeBytes   BigInt   @map("size_bytes")
+  status      String
+  triggeredBy String?  @map("triggered_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("backup_logs")
+}
+
+// ----------------------------------------------------
+// LEDGER MODELS
+// ----------------------------------------------------
+
+enum LedgerTransactionType {
+  OPENING_BALANCE
+  INVOICE
+  PAYMENT
+  CREDIT_BALANCE
+  CREDIT_USAGE
+  REVERSAL
+}
+
+model CustomerLedger {
+  id                String                @id @default(uuid())
+  customerId        String                @map("customer_id")
+  transactionNumber String                @map("transaction_number")
+  transactionType   LedgerTransactionType @map("transaction_type")
+  description       String
+  debit             Int                   @default(0)
+  credit            Int                   @default(0)
+  balanceAfter      Int                   @map("balance_after")
+  transactionDate   DateTime              @default(now()) @map("transaction_date")
+  referenceId       String?               @map("reference_id")
+  createdBy         String?               @map("created_by")
+  createdAt         DateTime              @default(now()) @map("created_at")
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  creator  User?    @relation(fields: [createdBy], references: [id], onDelete: SetNull)
+
+  @@index([customerId])
+  @@index([transactionDate])
+  @@map("customer_ledgers")
+}
